@@ -151,23 +151,24 @@ async function sendKaspa(destination, amount) {
   }
 }
 
-// -----------------------------------------------------------------
-// NEW: Function to send KRC20 Prize using ScriptBuilder and commit/reveal sequence
-// -----------------------------------------------------------------
 /**
  * Send KRC20 token prize from the treasury wallet to a destination address.
+ * This function mirrors the KAS sending logic (simpler connection, default fees, etc.)
+ * while still performing the necessary commit and reveal phases.
+ *
  * @param {string} destination - The recipient address.
  * @param {string|number} amount - The token amount to send.
  * @param {string} ticker - The KRC20 token ticker.
- * @returns {Promise<string>} - The final transaction id.
+ * @returns {Promise<string>} - The final transaction id (reveal hash).
  */
 async function sendKRC20(destination, amount, ticker) {
+  // Use default constants for network, fees, and timeout.
   const network = process.env.NETWORK_ID || "mainnet";
-  const priorityFeeValue = process.env.PRIORITY_FEE || "1.5";
-  const gasFee = process.env.GAS_FEE || "0.3";
-  const timeout = parseInt(process.env.KRC20_TIMEOUT || "120000", 10);
-  const logLevel = process.env.LOG_LEVEL || 'INFO';
+  const DEFAULT_PRIORITY_FEE = "0.02"; // same as used in sendKaspa
+  const DEFAULT_GAS_FEE = "0.3";
+  const DEFAULT_TIMEOUT = 120000; // 2 minutes timeout
 
+  // Create an RPC client with Borsh encoding.
   const RPC = new RpcClient({
     resolver: new Resolver(),
     encoding: Encoding.Borsh,
@@ -175,10 +176,11 @@ async function sendKRC20(destination, amount, ticker) {
   });
   await RPC.connect();
 
+  // Treasury private key and its public key.
   const treasuryPrivKey = new PrivateKey(TREASURY_PRIVATE_KEY);
   const publicKey = treasuryPrivKey.toPublicKey();
 
-  // Prepare the token transfer data.
+  // Prepare the KRC20 transfer data.
   const data = { "p": "krc-20", "op": "transfer", "tick": ticker, "amt": amount.toString(), "to": destination };
 
   // Build the spending script.
@@ -203,10 +205,11 @@ async function sendKRC20(destination, amount, ticker) {
   let eventReceived = false;
   let submittedTrxId;
 
+  // Listen for UTXO changes to determine when the commit/reveal transactions mature.
   RPC.addEventListener('utxos-changed', async (event) => {
-    const addressStr = publicKey.toAddress(network).toString();
+    const addrStr = publicKey.toAddress(network).toString();
     const addedEntry = event.data.added.find(entry =>
-      entry.address.payload === addressStr.split(':')[1]
+      entry.address.payload === addrStr.split(':')[1]
     );
     if (addedEntry && addedEntry.outpoint.transactionId === submittedTrxId) {
       eventReceived = true;
@@ -214,17 +217,19 @@ async function sendKRC20(destination, amount, ticker) {
   });
 
   try {
+    // -------------------------
     // Commit Phase
+    // -------------------------
     const { entries } = await RPC.getUtxosByAddresses({ addresses: [publicKey.toAddress(network).toString()] });
     const { transactions } = await createTransactions({
       priorityEntries: [],
       entries,
       outputs: [{
         address: P2SHAddress.toString(),
-        amount: kaspaToSompi(gasFee.toString())
+        amount: kaspaToSompi(DEFAULT_GAS_FEE)
       }],
       changeAddress: publicKey.toAddress(network).toString(),
-      priorityFee: kaspaToSompi(priorityFeeValue.toString()),
+      priorityFee: kaspaToSompi(DEFAULT_PRIORITY_FEE),
       networkId: network
     });
 
@@ -233,12 +238,13 @@ async function sendKRC20(destination, amount, ticker) {
       submittedTrxId = await tx.submit(RPC);
     }
 
+    // Wait for the commit phase to mature.
     await new Promise((resolve, reject) => {
       const commitTimeout = setTimeout(() => {
         if (!eventReceived) {
-          reject(new Error('Timeout waiting for commit UTXO maturity'));
+          reject(new Error("Timeout waiting for commit UTXO maturity"));
         }
-      }, timeout);
+      }, DEFAULT_TIMEOUT);
 
       (async function waitForEvent() {
         while (!eventReceived) {
@@ -249,7 +255,9 @@ async function sendKRC20(destination, amount, ticker) {
       })();
     });
 
+    // -------------------------
     // Reveal Phase
+    // -------------------------
     const { entries: currentEntries } = await RPC.getUtxosByAddresses({ addresses: [publicKey.toAddress(network).toString()] });
     const revealUTXOs = await RPC.getUtxosByAddresses({ addresses: [P2SHAddress.toString()] });
 
@@ -258,30 +266,30 @@ async function sendKRC20(destination, amount, ticker) {
       entries: currentEntries,
       outputs: [],
       changeAddress: publicKey.toAddress(network).toString(),
-      priorityFee: kaspaToSompi(gasFee.toString()),
+      priorityFee: kaspaToSompi(DEFAULT_GAS_FEE),
       networkId: network
     });
 
     let revealHash;
     for (const tx of revealTxs) {
       tx.sign([treasuryPrivKey], false);
-      const ourInputIndex = tx.transaction.inputs.findIndex(input => input.signatureScript === '');
-      if (ourInputIndex !== -1) {
-        const signature = await tx.createInputSignature(ourInputIndex, treasuryPrivKey);
-        tx.fillInput(ourInputIndex, script.encodePayToScriptHashSignatureScript(signature));
+      const inputIndex = tx.transaction.inputs.findIndex(input => input.signatureScript === "");
+      if (inputIndex !== -1) {
+        const signature = await tx.createInputSignature(inputIndex, treasuryPrivKey);
+        tx.fillInput(inputIndex, script.encodePayToScriptHashSignatureScript(signature));
       }
       revealHash = await tx.submit(RPC);
       submittedTrxId = revealHash;
     }
 
-    // Wait for the reveal event.
+    // Wait for the reveal phase to mature.
     eventReceived = false;
     await new Promise((resolve, reject) => {
       const revealTimeout = setTimeout(() => {
         if (!eventReceived) {
-          reject(new Error('Timeout waiting for reveal UTXO maturity'));
+          reject(new Error("Timeout waiting for reveal UTXO maturity"));
         }
-      }, timeout);
+      }, DEFAULT_TIMEOUT);
 
       (async function waitForReveal() {
         while (!eventReceived) {
