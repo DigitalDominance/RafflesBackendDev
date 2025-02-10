@@ -16,7 +16,7 @@ app.use(cors({
     if (!origin) return callback(null, true);
     const allowedOrigins = [
       'https://raffles.kaspercoin.net',
-      'https://kaspa-raffles-frontend-569b7d5f25f3.herokuapp.com'
+      'https://kaspa-raffles-frontenddev-e229a2396b6e.herokuapp.com'
     ];
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
