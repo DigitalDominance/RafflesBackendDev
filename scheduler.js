@@ -1,22 +1,22 @@
+// scheduler.js
 const cron = require('node-cron');
 const Raffle = require('./models/Raffle');
+const { sendKaspa, sendKRC20 } = require('./wasm_rpc');
 
-// Function to complete expired raffles
 async function completeExpiredRaffles() {
   try {
     const now = new Date();
-    // Find all raffles that are still live and have reached (or passed) their end time.
+    // Find raffles that are live but whose timeframe is passed.
     const expiredRaffles = await Raffle.find({ status: "live", timeFrame: { $lte: now } });
     console.log(`Found ${expiredRaffles.length} expired raffles to complete.`);
+
     for (const raffle of expiredRaffles) {
+      // Determine winners via your weighted random selection logic.
       if (raffle.entries && raffle.entries.length > 0) {
-        // Create a wallet totals object to sum credits per wallet.
         const walletTotals = {};
         raffle.entries.forEach(entry => {
           walletTotals[entry.walletAddress] = (walletTotals[entry.walletAddress] || 0) + entry.creditsAdded;
         });
-        
-        // If only one winner is set, use the single-winner logic.
         if (raffle.winnersCount === 1) {
           const totalCredits = Object.values(walletTotals).reduce((sum, val) => sum + val, 0);
           let random = Math.random() * totalCredits;
@@ -29,11 +29,9 @@ async function completeExpiredRaffles() {
             }
           }
           raffle.winner = chosen;
-          raffle.winnersList = []; // Clear any winnersList data if present.
+          raffle.winnersList = [];
         } else {
-          // Multiple winners: pick unique winners using weighted random selection.
           const winners = [];
-          // Clone walletTotals so we can modify it without affecting the original data.
           const availableWallets = { ...walletTotals };
           const maxWinners = Math.min(raffle.winnersCount, Object.keys(availableWallets).length);
           for (let i = 0; i < maxWinners; i++) {
@@ -49,26 +47,64 @@ async function completeExpiredRaffles() {
             }
             if (chosenWallet) {
               winners.push(chosenWallet);
-              // Remove the winning wallet so they cannot win again.
               delete availableWallets[chosenWallet];
             }
           }
-          // For backwards compatibility, if only one winner is chosen, save it to raffle.winner.
           raffle.winner = winners.length === 1 ? winners[0] : null;
           raffle.winnersList = winners;
         }
       } else {
-        // No entries were made.
         raffle.winner = "No Entries";
         raffle.winnersList = [];
       }
       raffle.status = "completed";
       raffle.completedAt = now;
       await raffle.save();
+
+      // Only send prizes if winners exist.
+      let winnersArray = [];
       if (raffle.winnersList && raffle.winnersList.length > 0) {
-        console.log(`Raffle ${raffle.raffleId} completed. Winners: ${raffle.winnersList.join(', ')}`);
+        winnersArray = raffle.winnersList;
+      } else if (raffle.winner && raffle.winner !== "No Entries") {
+        winnersArray = [raffle.winner];
+      }
+
+      // Calculate per-winner prize (splitting evenly).
+      if (winnersArray.length > 0) {
+        const totalPrize = raffle.prizeAmount;
+        const perWinnerPrize = totalPrize / winnersArray.length;
+
+        // For each winner, send the prize.
+        for (const winnerAddress of winnersArray) {
+          try {
+            let txid;
+            if (raffle.prizeType === "KAS") {
+              txid = await sendKaspa(winnerAddress, perWinnerPrize);
+            } else if (raffle.prizeType === "KRC20") {
+              // For KRC20, we use the token ticker stored in raffle.tokenTicker.
+              txid = await sendKRC20(winnerAddress, perWinnerPrize, raffle.tokenTicker);
+            }
+            console.log(`Sent prize to ${winnerAddress}. Transaction ID: ${txid}`);
+            // Optionally, record the prize transaction details on the raffle.
+            raffle.processedTransactions.push({
+              txid,
+              coinType: raffle.prizeType,
+              amount: perWinnerPrize,
+              timestamp: new Date()
+            });
+          } catch (err) {
+            console.error(`Error sending prize to ${winnerAddress}: ${err.message}`);
+          }
+        }
+        // Mark that the prize has been confirmed.
+        raffle.prizeConfirmed = true;
+        // You could also store an array of prize txids if needed.
+        await raffle.save();
+      }
+      if (winnersArray.length > 0) {
+        console.log(`Raffle ${raffle.raffleId} completed. Winners: ${winnersArray.join(', ')}`);
       } else {
-        console.log(`Raffle ${raffle.raffleId} completed. Winner: ${raffle.winner}`);
+        console.log(`Raffle ${raffle.raffleId} completed. No valid entries for prize distribution.`);
       }
     }
   } catch (err) {
@@ -76,7 +112,7 @@ async function completeExpiredRaffles() {
   }
 }
 
-// Schedule the job to run every minute
+// Schedule the job to run every minute.
 cron.schedule('* * * * *', async () => {
   console.log('Running raffle completion scheduler...');
   await completeExpiredRaffles();
