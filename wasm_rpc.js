@@ -153,20 +153,20 @@ async function sendKaspa(destination, amount) {
 
 /**
  * Send KRC20 token prize from the treasury wallet to a destination address.
- * This function mirrors the KAS sending logic (simpler connection, default fees, etc.)
- * while still performing the necessary commit and reveal phases.
+ * This function mirrors the KAS sending logic (using default fees and timeouts)
+ * while performing the commit and reveal phases.
  *
  * @param {string} destination - The recipient address.
- * @param {string|number} amount - The token amount to send.
+ * @param {string|number} amount - The token amount to send (in token units, e.g. 100).
  * @param {string} ticker - The KRC20 token ticker.
- * @returns {Promise<string>} - The final transaction id (reveal hash).
+ * @returns {Promise<string>} - The final transaction id (the reveal hash).
  */
 async function sendKRC20(destination, amount, ticker) {
-  // Use default constants for network, fees, and timeout.
+  // Use default constants (these mimic the KAS flow)
   const network = process.env.NETWORK_ID || "mainnet";
   const DEFAULT_PRIORITY_FEE = "0.02"; // same as used in sendKaspa
   const DEFAULT_GAS_FEE = "0.3";
-  const DEFAULT_TIMEOUT = 120000; // 2 minutes timeout
+  const DEFAULT_TIMEOUT = 120000; // 2 minutes
 
   // Create an RPC client with Borsh encoding.
   const RPC = new RpcClient({
@@ -180,8 +180,20 @@ async function sendKRC20(destination, amount, ticker) {
   const treasuryPrivKey = new PrivateKey(TREASURY_PRIVATE_KEY);
   const publicKey = treasuryPrivKey.toPublicKey();
 
-  // Prepare the KRC20 transfer data.
-  const data = { "p": "krc-20", "op": "transfer", "tick": ticker, "amt": amount.toString(), "to": destination };
+  // *** IMPORTANT CONVERSION STEP ***
+  // Convert the token amount using the kaspaToSompi conversion.
+  // For example, if you pass in 100, this will convert it to 100 × 1e8.
+  const convertedAmount = kaspaToSompi(amount.toString());
+  
+  // Prepare the KRC20 transfer data using the converted amount.
+  const data = {
+    "p": "krc-20",
+    "op": "transfer",
+    "tick": ticker,
+    // Use the converted amount here
+    "amt": convertedAmount.toString(),
+    "to": destination
+  };
 
   // Build the spending script.
   const script = new ScriptBuilder()
@@ -307,6 +319,7 @@ async function sendKRC20(destination, amount, ticker) {
     throw new Error("Error sending KRC20: " + err.message);
   }
 }
+
 
 // -----------------------------------------------------------------
 // Command-line interface for testing (keeps createWallet command intact)
